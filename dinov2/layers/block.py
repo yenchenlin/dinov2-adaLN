@@ -258,3 +258,28 @@ class NestedTensorBlock(Block):
             return self.forward_nested(x_or_x_list)
         else:
             raise AssertionError
+
+
+class AdaLNBlock(Block):
+    def __init__(self, dim: int, *args, **kwargs):
+        super().__init__(dim=dim, *args, **kwargs)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(dim, 4 * dim, bias=True)
+        )
+
+    def forward(self, x: Tensor, c: Tensor = None) -> Tensor:
+        if c is None:
+            # Fall back to normal block
+            return super().forward(x)
+        else:
+            if self.sample_drop_ratio > 0.0:
+                raise NotImplementedError("Dropout not implemented for AdaLNBlock")
+
+            def modulate(x, shift, scale):
+                return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
+            scale_msa, shift_msa, scale_mlp, shift_mlp = self.adaLN_modulation(c).chunk(4, dim=1)
+            x = x + self.ls1(self.attn(modulate(self.norm1(x), shift_msa, scale_msa)))
+            x = x + self.ls2(self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp)))
+            return x

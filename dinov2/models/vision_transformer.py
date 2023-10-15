@@ -17,7 +17,7 @@ import torch.nn as nn
 import torch.utils.checkpoint
 from torch.nn.init import trunc_normal_
 
-from dinov2.layers import Mlp, PatchEmbed, SwiGLUFFNFused, MemEffAttention, NestedTensorBlock as Block
+from dinov2.layers import Mlp, PatchEmbed, SwiGLUFFNFused, MemEffAttention, NestedTensorBlock as Block, AdaLNBlock
 
 
 logger = logging.getLogger("dinov2")
@@ -355,6 +355,57 @@ def vit_giant2(patch_size=16, **kwargs):
         num_heads=24,
         mlp_ratio=4,
         block_fn=partial(Block, attn_class=MemEffAttention),
+        **kwargs,
+    )
+    return model
+
+
+class AdaLNDinoVisionTransformer(DinoVisionTransformer):
+    def __init__(self, *args, **kwargs):
+        self.block_fn = AdaLNBlock
+        super().__init__(*args, **kwargs)
+
+        # Initialization
+        dino = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14").cuda().eval()
+        dino_named_tensors = dict(dino.named_parameters())
+        named_tensors = dict(self.named_parameters())
+        for k, v in dino_named_tensors.items():
+            named_tensors[k].data = v.data
+        del dino, dino_named_tensors
+
+        for block in self.blocks:
+            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+
+    def forward_features(self, x, c=None, masks=None):
+        if isinstance(x, list):
+            assert False, "List input not implemented"
+
+        x = self.prepare_tokens_with_masks(x, masks)
+
+        for blk in self.blocks:
+            x = blk(x, c=c)
+
+        x_norm = self.norm(x)
+        return {
+            "x_norm_clstoken": x_norm[:, 0],
+            "x_norm_patchtokens": x_norm[:, 1:],
+            "x_prenorm": x,
+            "masks": masks,
+        }
+
+
+def adaLN_vit_base(img_size=518, patch_size=14, **kwargs):
+    model = AdaLNDinoVisionTransformer(
+        img_size=img_size,
+        patch_size=patch_size,
+        embed_dim=768,
+        depth=12,
+        num_heads=12,
+        mlp_ratio=4,
+        block_fn=partial(AdaLNBlock, attn_class=MemEffAttention),
+        init_values=1,
+        block_chunks=0,
         **kwargs,
     )
     return model
